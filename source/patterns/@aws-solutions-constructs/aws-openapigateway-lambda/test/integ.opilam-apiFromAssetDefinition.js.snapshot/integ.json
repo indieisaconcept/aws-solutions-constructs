@@ -1,0 +1,12 @@
+{
+  "version": "36.0.24",
+  "testCases": {
+    "opilam-apiFromAssetDefinition/Integ/DefaultTest": {
+      "stacks": [
+        "opilam-apiFromAssetDefinition"
+      ],
+      "assertionStack": "opilam-apiFromAssetDefinition/Integ/DefaultTest/DeployAssert",
+      "assertionStackName": "opilamapiFromAssetDefinitionIntegDefaultTestDeployAssert1DA39E0A"
+    }
+  }
+}

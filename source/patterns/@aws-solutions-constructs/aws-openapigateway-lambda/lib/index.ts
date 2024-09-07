@@ -66,6 +66,10 @@ export interface ApiLambdaFunction {
 
 export interface OpenApiGatewayToLambdaProps {
   /**
+   * API Definition which specifies where the OpenAPI spec is located.
+   */
+  readonly apiDefinition?: apigateway.ApiDefinition;
+  /**
    * S3 Bucket where the OpenAPI spec file is located. When specifying this property, apiDefinitionKey must also be specified.
    */
   readonly apiDefinitionBucket?: s3.IBucket;
@@ -146,8 +150,19 @@ export class OpenApiGatewayToLambda extends Construct {
     super(scope, id);
     CheckOpenapiProps(props);
 
-    const apiDefinitionBucket = props.apiDefinitionBucket ?? props.apiDefinitionAsset?.bucket;
-    const apiDefinitionKey = props.apiDefinitionKey ?? props.apiDefinitionAsset?.s3ObjectKey;
+    let apiDefinitionBucket: s3.IBucket | undefined;
+    let apiDefinitionKey: string | undefined;
+
+    const apiDefinitionConfig = props.apiDefinition?.bind(this);
+
+    if (!apiDefinitionConfig) {
+      apiDefinitionBucket = props.apiDefinitionBucket ?? props.apiDefinitionAsset?.bucket;
+      apiDefinitionKey = props.apiDefinitionKey ?? props.apiDefinitionAsset?.s3ObjectKey;
+    } else if (apiDefinitionConfig.s3Location) {
+      // applicable to ApiDefinition.fromAsset and ApiDefinition.fromBucket
+      apiDefinitionBucket = s3.Bucket.fromBucketName(scope, 'ApiDefinitionBucket', apiDefinitionConfig.s3Location.bucket);
+      apiDefinitionKey = apiDefinitionConfig.s3Location.key;
+    }
 
     // store a counter to be able to uniquely name lambda functions to avoid naming collisions
     let lambdaCounter = 0;
@@ -183,22 +198,30 @@ export class OpenApiGatewayToLambda extends Construct {
       };
     });
 
-    // This custom resource will overwrite the string placeholders in the openapi definition with the resolved values of the lambda URIs
-    const apiDefinitionWriter = resources.createTemplateWriterCustomResource(this, 'Api', {
-      // CheckAlbProps() has confirmed the existence of these values
-      templateBucket: apiDefinitionBucket!,
-      templateKey: apiDefinitionKey!,
-      templateValues: apiIntegrationUris,
-      timeout: props.internalTransformTimeout ?? cdk.Duration.minutes(1),
-      memorySize: props.internalTransformMemorySize ?? 1024
-    });
+    let apiDefinition: apigateway.ApiDefinition;
+
+    if (apiDefinitionBucket && apiDefinitionKey) {
+      // This custom resource will overwrite the string placeholders in the openapi definition with the resolved values of the lambda URIs
+      const apiDefinitionWriter = resources.createTemplateWriterCustomResource(this, 'Api', {
+        // CheckOpenapiProps() has confirmed the existence of these values
+        templateBucket: apiDefinitionBucket,
+        templateKey: apiDefinitionKey,
+        templateValues: apiIntegrationUris,
+        timeout: props.internalTransformTimeout ?? cdk.Duration.minutes(1),
+        memorySize: props.internalTransformMemorySize ?? 1024
+      });
+
+      apiDefinition = apigateway.ApiDefinition.fromBucket(
+        apiDefinitionWriter.s3Bucket,
+        apiDefinitionWriter.s3Key
+      );
+    } else if (apiDefinitionConfig?.inlineDefinition) {
+      apiDefinition = InlineTemplateWriter(apiDefinitionConfig, apiIntegrationUris);
+    }
 
     const specRestApiResponse = defaults.CreateSpecRestApi(this, {
       ...props.apiGatewayProps,
-      apiDefinition: apigateway.ApiDefinition.fromBucket(
-        apiDefinitionWriter.s3Bucket,
-        apiDefinitionWriter.s3Key
-      )
+      apiDefinition: apiDefinition!,
     }, props.logGroupProps);
 
     this.apiGateway = specRestApiResponse.api;
@@ -220,10 +243,30 @@ export class OpenApiGatewayToLambda extends Construct {
   }
 }
 
+function InlineTemplateWriter(definition: apigateway.ApiDefinitionConfig, templateValues: resources.TemplateValue[]) {
+  let template = JSON.stringify(definition.inlineDefinition);
+
+  templateValues.forEach((templateValue) => {
+    template = template?.replace(new RegExp(templateValue.id, 'g'), templateValue.value);
+  });
+
+  return apigateway.ApiDefinition.fromInline(JSON.parse(template));
+}
+
 function CheckOpenapiProps(props: OpenApiGatewayToLambdaProps) {
 
   let errorMessages = '';
   let errorFound = false;
+
+  if (props.apiDefinition && props.apiDefinitionAsset) {
+    errorMessages += 'Either apiDefinition or apiDefinitionAsset must be specified, but not both\n';
+    errorFound = true;
+  }
+
+  if (props.apiDefinition && (props.apiDefinitionBucket || props.apiDefinitionKey)) {
+    errorMessages += 'Either apiDefinitionBucket/apiDefinitionKey or apiDefinition must be specified, but not both\n';
+    errorFound = true;
+  }
 
   if (props.apiDefinitionAsset && (props.apiDefinitionBucket || props.apiDefinitionKey)) {
     errorMessages += 'Either apiDefinitionBucket/apiDefinitionKey or apiDefinitionAsset must be specified, but not both\n';
@@ -233,8 +276,8 @@ function CheckOpenapiProps(props: OpenApiGatewayToLambdaProps) {
   const apiDefinitionBucket = props.apiDefinitionBucket ?? props.apiDefinitionAsset?.bucket;
   const apiDefinitionKey = props.apiDefinitionKey ?? props.apiDefinitionAsset?.s3ObjectKey;
 
-  if (apiDefinitionBucket === undefined || apiDefinitionKey === undefined) {
-    errorMessages += 'Either apiDefinitionBucket/apiDefinitionKey or apiDefinitionAsset must be specified\n';
+  if (props.apiDefinition === undefined && (apiDefinitionBucket === undefined || apiDefinitionKey === undefined)) {
+    errorMessages += 'Either apiDefinitionBucket/apiDefinitionKey, apiDefinitionAsset or apiDefinition must be specified\n';
     errorFound = true;
   }
 
